@@ -5,7 +5,82 @@ test_that("req_stream() is deprecated", {
   )
 })
 
-test_that("returns empty body; sets last request & response", {
+# req_perform_connection() ----------------------------------------------------
+
+test_that("can stream bytes from a connection", {
+  resp <- request_test("/stream-bytes/2048") %>% req_perform_connection()
+  on.exit(close(resp))
+
+  expect_s3_class(resp, "httr2_response")
+  expect_true(resp_has_body(resp))
+
+  out <- resp_stream_raw(resp, 1)
+  expect_length(out, 1024)
+
+  out <- resp_stream_raw(resp, 1)
+  expect_length(out, 1024)
+
+  out <- resp_stream_raw(resp, 1)
+  expect_length(out, 0)
+})
+
+test_that("can read all data from a connection", {
+  resp <- request_test("/stream-bytes/2048") %>% req_perform_connection()
+
+  out <- resp_body_raw(resp)
+  expect_length(out, 2048)
+  expect_false(resp_has_body(resp))
+})
+
+test_that("can't read from a closed connection", {
+  resp <- request_test("/stream-bytes/1024") %>% req_perform_connection()
+  close(resp)
+
+  expect_false(resp_has_body(resp))
+  expect_snapshot(resp_stream_raw(resp, 1), error = TRUE)
+
+  # and no error if we try to close it again
+  expect_no_error(close(resp))
+})
+
+test_that("can feed sse events one at a time", {
+  skip_on_covr()
+  app <- webfakes::new_app()
+
+  app$get("/events", function(req, res) {
+    for(i in 1:3) {
+      res$send_chunk(sprintf("data: %s\n\n", i))
+    }
+  })
+
+  server <- webfakes::local_app_process(app)
+  req <- request(server$url("/events"))
+  resp <- req_perform_connection(req, mode = "text")
+  on.exit(close(resp))
+
+  expect_equal(
+    resp_stream_sse(resp),
+    list(type = "message", data = "1", id = character())
+  )
+  expect_equal(
+    resp_stream_sse(resp),
+    list(type = "message", data = "2", id = character())
+  )
+  resp_stream_sse(resp)
+
+  expect_equal(resp_stream_sse(resp), NULL)
+})
+
+test_that("resp_stream_sse() requires a text connection", {
+  resp <- request_test("/stream-bytes/1024") %>% req_perform_connection()
+  on.exit(close(resp))
+
+  expect_snapshot(resp_stream_sse(resp), error = TRUE)
+})
+
+# req_perform_stream() --------------------------------------------------------
+
+test_that("returns stream body; sets last request & response", {
   req <- request_test("/stream-bytes/1024")
   resp <- req_perform_stream(req, function(x) NULL)
   expect_s3_class(resp, "httr2_response")
@@ -16,7 +91,7 @@ test_that("returns empty body; sets last request & response", {
 })
 
 test_that("HTTP errors become R errors", {
-  req <- request_test("/status/404") 
+  req <- request_test("/status/404")
   expect_error(
     req_perform_stream(req, function(x) TRUE),
     class = "httr2_http_404"
@@ -29,8 +104,8 @@ test_that("HTTP errors become R errors", {
 
 test_that("can override error handling", {
   req <- request_test("/base64/:value", value = "YWJj") %>%
-    req_error(is_error = function(resp) TRUE) 
-  
+    req_error(is_error = function(resp) TRUE)
+
   expect_error(
     req %>% req_perform_stream(function(x) NULL),
     class = "httr2_http_200"
@@ -94,7 +169,7 @@ test_that("eventually terminates even if never rounded", {
 test_that("req_perform_stream checks its inputs", {
   req <- request_test("/stream-bytes/1024")
   callback <- function(x) NULL
-  
+
   expect_snapshot(error = TRUE, {
     req_perform_stream(1)
     req_perform_stream(req, 1)
